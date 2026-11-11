@@ -1,0 +1,96 @@
+name: Native artifact proof (fork only)
+
+on:
+  push:
+    branches: [bvolpato/native-artifact-proof-20261111]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-artifact-proof
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-verify:
+    if: github.repository == 'bvolpato/AppleMobileDeviceLibrary'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Check out immutable PR source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bvolpato/AppleMobileDeviceLibrary
+          ref: 1484045d2d841ff78666238fd11a3cfc637e4ab4
+          persist-credentials: false
+      - name: Install native build tools
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 1484045d2d841ff78666238fd11a3cfc637e4ab4
+          brew install libtool autoconf automake pkgconf coreutils bash zip swiftformat jq wget
+          /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+          xcodebuild -version
+          xcodebuild -showsdks
+      - name: Build universal libraries and packages
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:/opt/homebrew/bin:/opt/homebrew/sbin"
+          ./Scripts/build.sh clean
+      - name: Validate compiled provenance and package notices
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:/opt/homebrew/bin:/opt/homebrew/sbin"
+          ./Scripts/payload.notices.sh verify build/build
+          ./Scripts/payload.notices.sh verify build/build.spm
+          ./Scripts/payload.notices.sh compare build/build.arm64 build/build.x86_64
+          jq -e '.components[]|select(.name=="AppleMobileDeviceLibrary")|.revision=="1484045d2d841ff78666238fd11a3cfc637e4ab4"' build/build/Licenses/manifest.json
+          frameworks=(build/build.frameworks/*.xcframework)
+          archives=(build/build.spm/BinaryTargets/*.xcframework.zip)
+          test "${#frameworks[@]}" = 6
+          test "${#archives[@]}" = 6
+          for framework in "${frameworks[@]}"; do
+            ./Scripts/payload.notices.sh compare build/build "$framework"
+          done
+          for archive in "${archives[@]}"; do
+            ./Scripts/payload.notices.sh verify-zip "$archive" "$(basename "$archive" .zip)"
+          done
+          for library in libcrypto.a libssl.a libplist-2.0.a libtatsu.a libimobiledevice-glue-1.0.a libusbmuxd-2.0.a libimobiledevice-1.0.a libideviceactivation-1.0.a; do
+            lipo -verify_arch arm64 x86_64 "build/build/lib/$library"
+          done
+          mkdir -p "$RUNNER_TEMP/native-proof"
+          mv build/build.spm "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary"
+          cp src.version "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary/.version"
+          cp -R build/build/Licenses "$RUNNER_TEMP/native-proof/Licenses"
+          (
+            cd "$RUNNER_TEMP/native-proof"
+            zip -r9 Licenses.zip Licenses
+          )
+          ./Scripts/payload.notices.sh verify-zip "$RUNNER_TEMP/native-proof/Licenses.zip"
+          gzip -c build/build.binpack/binpack.tar > "$RUNNER_TEMP/native-proof/binpack.tar.gz"
+          ./Scripts/payload.notices.sh verify-tar "$RUNNER_TEMP/native-proof/binpack.tar.gz"
+          {
+            git rev-parse HEAD
+            xcodebuild -version
+            jq -r '.components[]|[.name,.origin,.revision,.tree]|@tsv' build/build/Licenses/manifest.json
+          } > "$RUNNER_TEMP/native-proof/build-context.txt"
+          (
+            cd "$RUNNER_TEMP/native-proof"
+            shasum -a 256 Licenses.zip binpack.tar.gz AppleMobileDeviceLibrary/BinaryTargets/*.zip > SHA256SUMS
+          )
+      - name: Build the generated Swift package
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary"
+          swift build
+      - name: Upload verified native packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-AppleMobileDeviceLibrary-1484045d2d84
+          path: ${{ runner.temp }}/native-proof
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
