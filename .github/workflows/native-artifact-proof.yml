@@ -61,11 +61,16 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$PATH:/opt/homebrew/bin:/opt/homebrew/sbin"
-          ./Scripts/build.sh clean
+          ./Scripts/build.sh clean 2>&1 | tee "$RUNNER_TEMP/native-proof/native-build.log"
       - name: Validate compiled provenance and package notices
         run: |
           set -euo pipefail
           export PATH="$PATH:/opt/homebrew/bin:/opt/homebrew/sbin"
+          {
+            git rev-parse HEAD
+            xcodebuild -version
+            jq -r '.components[]|[.name,.origin,.revision,.tree]|@tsv' build/build/Licenses/manifest.json
+          } > "$RUNNER_TEMP/native-proof/build-context.txt"
           ./Scripts/payload.notices.sh verify build/build
           ./Scripts/payload.notices.sh verify build/build.spm
           ./Scripts/payload.notices.sh compare build/build.arm64 build/build.x86_64
@@ -81,11 +86,13 @@ jobs:
             ./Scripts/payload.notices.sh verify-zip "$archive" "$(basename "$archive" .zip)"
           done
           for library in libcrypto.a libssl.a libplist-2.0.a libtatsu.a libimobiledevice-glue-1.0.a libusbmuxd-2.0.a libimobiledevice-1.0.a libideviceactivation-1.0.a; do
-            lipo "build/build/lib/$library" -verify_arch arm64 x86_64
+            xcrun lipo "build/build/lib/$library" -verify_arch arm64
+            xcrun lipo "build/build/lib/$library" -verify_arch x86_64
           done
           mkdir -p "$RUNNER_TEMP/native-proof"
           mv build/build.spm "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary"
           cp src.version "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary/.version"
+          cp src.version "$RUNNER_TEMP/native-proof/src.version"
           cp -R build/build/Licenses "$RUNNER_TEMP/native-proof/Licenses"
           (
             cd "$RUNNER_TEMP/native-proof"
@@ -94,11 +101,6 @@ jobs:
           ./Scripts/payload.notices.sh verify-zip "$RUNNER_TEMP/native-proof/Licenses.zip"
           gzip -c build/build.binpack/binpack.tar > "$RUNNER_TEMP/native-proof/binpack.tar.gz"
           ./Scripts/payload.notices.sh verify-tar "$RUNNER_TEMP/native-proof/binpack.tar.gz"
-          {
-            git rev-parse HEAD
-            xcodebuild -version
-            jq -r '.components[]|[.name,.origin,.revision,.tree]|@tsv' build/build/Licenses/manifest.json
-          } > "$RUNNER_TEMP/native-proof/build-context.txt"
           (
             cd "$RUNNER_TEMP/native-proof"
             shasum -a 256 Licenses.zip binpack.tar.gz AppleMobileDeviceLibrary/BinaryTargets/*.zip > SHA256SUMS
@@ -108,12 +110,27 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary"
           swift build
-      - name: Upload native packages and diagnostic evidence
-        if: always()
+      - name: Upload verified native packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verified-AppleMobileDeviceLibrary-1484045d2d84
           path: ${{ runner.temp }}/native-proof
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Preserve unverified diagnostics and completed outputs on failure
+        if: always() && !success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unverified-AppleMobileDeviceLibrary-diagnostics-1484045d2d84
+          path: |
+            ${{ runner.temp }}/native-proof/
+            build/build/Licenses/
+            build/build/lib/*.a
+            build/build.*/Licenses/
+            build/build.spm/
+            build/build.binpack/
+            src.version
+          if-no-files-found: warn
           compression-level: 0
           retention-days: 7
