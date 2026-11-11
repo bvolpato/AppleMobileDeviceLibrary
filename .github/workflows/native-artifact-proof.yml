@@ -18,7 +18,7 @@ defaults:
 jobs:
   build-and-verify:
     if: github.repository == 'bvolpato/AppleMobileDeviceLibrary'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - name: Check out immutable PR source
