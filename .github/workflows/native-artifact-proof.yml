@@ -18,7 +18,7 @@ defaults:
 jobs:
   build-and-verify:
     if: github.repository == 'bvolpato/AppleMobileDeviceLibrary'
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - name: Check out immutable PR source
@@ -27,6 +27,28 @@ jobs:
           repository: bvolpato/AppleMobileDeviceLibrary
           ref: 1484045d2d841ff78666238fd11a3cfc637e4ab4
           persist-credentials: false
+      - name: Select Xcode 27.1 and record the actual toolchain
+        run: |
+          set -euo pipefail
+          selected=''
+          for application in /Applications/Xcode_27.1.app /Applications/Xcode_27.1.0.app; do
+            if [ -d "$application/Contents/Developer" ]; then
+              selected="$application/Contents/Developer"
+              break
+            fi
+          done
+          test -n "$selected"
+          export DEVELOPER_DIR="$selected"
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/native-proof"
+          {
+            printf 'Source commit: %s\nWorkflow commit: %s\n' "$(git rev-parse HEAD)" "$GITHUB_SHA"
+            printf 'Developer directory: %s\n' "$DEVELOPER_DIR"
+            uname -m
+            xcodebuild -version
+            xcodebuild -showsdks
+            xcrun swift --version
+          } | tee "$RUNNER_TEMP/native-proof/toolchain-context.txt"
       - name: Install native build tools
         run: |
           set -euo pipefail
@@ -86,7 +108,8 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/native-proof/AppleMobileDeviceLibrary"
           swift build
-      - name: Upload verified native packages
+      - name: Upload native packages and diagnostic evidence
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verified-AppleMobileDeviceLibrary-1484045d2d84
