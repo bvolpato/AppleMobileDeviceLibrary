@@ -1,0 +1,118 @@
+name: Generator repair proof (fork only)
+
+on:
+  push:
+    branches: [bvolpato/module-map-repack-proof-20261111]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: module-map-repack-proof
+  cancel-in-progress: false
+
+jobs:
+  regenerate-and-consume:
+    if: github.repository == 'bvolpato/AppleMobileDeviceLibrary'
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact repaired production generator with notice support
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bvolpato/AppleMobileDeviceLibrary
+          ref: e9adebbe086a75697724c2570ce37ba3d0aa1574
+          path: source
+          persist-credentials: false
+      - name: Check out the trusted validation helper
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bvolpato/AppleMobileDeviceLibrary
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+      - name: Select and record the packaging toolchain
+        run: |
+          set -euo pipefail
+          selected=''
+          for application in /Applications/Xcode_27.1.app /Applications/Xcode_27.1.0.app; do
+            if [ -d "$application/Contents/Developer" ]; then
+              selected="$application/Contents/Developer"
+              break
+            fi
+          done
+          test -n "$selected"
+          export DEVELOPER_DIR="$selected"
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          brew install bash jq coreutils swiftformat uv
+          mkdir -p proof
+          {
+            printf 'Generator source: %s\nWorkflow source: %s\n' "$(git -C source rev-parse HEAD)" "$GITHUB_SHA"
+            printf 'Original native compilation run: 43055257192\n'
+            printf 'Developer directory: %s\n' "$DEVELOPER_DIR"
+            xcodebuild -version
+            xcodebuild -showsdks
+            xcrun swift --version
+          } | tee proof/generator-toolchain-context.txt
+      - name: Download the exact original native inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unverified-AppleMobileDeviceLibrary-diagnostics-1484045d2d84
+          run-id: 43055257192
+          github-token: ${{ github.token }}
+          path: original
+      - name: Recover unchanged libraries and headers with their original provenance
+        run: |
+          set -euo pipefail
+          uv run validation/.github/scripts/amdl-repack-proof.py prepare \
+            --artifact original --source source --proof proof 2>&1 | tee proof/recovery.log
+          source/Scripts/payload.notices.sh verify source/build/build
+          source/Scripts/payload.notices.sh compare source/build/build.arm64 source/build/build.x86_64
+          for library in source/build/build/lib/*.a; do
+            xcrun lipo "$library" -verify_arch arm64
+            xcrun lipo "$library" -verify_arch x86_64
+          done
+      - name: Run the actual production framework and Swift package generators
+        run: |
+          set -euo pipefail
+          source/Scripts/build.xcframework.sh 2>&1 | tee proof/framework-generator.log
+          source/Scripts/build.spm.sh 2>&1 | tee proof/package-generator.log
+      - name: Check every generated header reference and preserve compiled contexts
+        run: |
+          set -euo pipefail
+          uv run validation/.github/scripts/amdl-repack-proof.py verify \
+            --source source --proof proof 2>&1 | tee proof/header-contract.log
+          source/Scripts/payload.notices.sh compare source/build/build source/build/build.spm
+          for archive in source/build/build.spm/BinaryTargets/*.zip; do
+            source/Scripts/payload.notices.sh verify-zip "$archive" "$(basename "$archive" .zip)"
+          done
+      - name: Build the generated Swift package against the regenerated XCFrameworks
+        run: |
+          set -euo pipefail
+          swift build --package-path source/build/build.spm 2>&1 | tee proof/swift-consumer.log
+      - name: Stage test artifacts and output checksums
+        run: |
+          set -euo pipefail
+          mkdir proof/candidate
+          cp source/build/build.spm/Package.swift proof/candidate/
+          cp -R source/build/build.spm/BinaryTargets source/build/build.spm/Sources \
+            source/build/build.spm/Licenses proof/candidate/
+          (
+            cd proof
+            shasum -a 256 candidate/BinaryTargets/*.zip > regenerated-SHA256SUMS
+          )
+      - name: Upload generator repair evidence and test artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: amdl-generator-repack-evidence-5bfd9a6430f7
+          path: proof
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
